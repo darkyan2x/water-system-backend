@@ -20,11 +20,27 @@ class User extends Authenticatable
      *
      * @var list<string>
      */
+    // protected $fillable = [
+    //     'name','email','password','role',
+    //     'account_number','mobile','address','barangay','purok','account_name',
+    //     'current_reading','previous_reading','x_coordinate','y_coordinate',
+    //     'status','last_usage','billing_date','account_type','balance',
+    // ];
     protected $fillable = [
-        'name','email','password','role',
-        'account_number','mobile','address','barangay','purok','account_name',
-        'current_reading','previous_reading','x_coordinate','y_coordinate',
-        'status','last_usage','billing_date','account_type','balance',
+        'name',
+        'email',
+        'password',
+        'account_name',
+        'role',
+        'account_number',
+        'mobile',
+        'account_type',
+        'barangay',
+        'starting_meter',
+        'billing_date',
+        'previous_reading',
+        'status',
+        'status_badges',
     ];
 
 
@@ -48,6 +64,9 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'tagged_barangays' => 'array',
+            'status_badges' => 'array',
+            'starting_meter' => 'integer',
         ];
     }
 

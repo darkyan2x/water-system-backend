@@ -6,27 +6,37 @@ use Illuminate\Foundation\Http\FormRequest;
 
 class StoreReadingRequest extends FormRequest
 {
-    /**
-     * Determine if the user is authorized to make this request.
-     */
     public function authorize(): bool
     {
-        $role = strtolower((string) $this->user()?->role);
-
-        return in_array($role, ['admin', 'master', 'reader'], true);
+        return true;
     }
 
-    /**
-     * Get the validation rules that apply to the request.
-     *
-     * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
-     */
+    protected function prepareForValidation(): void
+    {
+        /*
+         * Temporary backward compatibility:
+         * old frontend/offline queue may still send "value".
+         * New frontend should send "current_reading".
+         */
+        if (!$this->has('current_reading') && $this->has('value')) {
+            $this->merge([
+                'current_reading' => $this->input('value'),
+            ]);
+        }
+    }
+
     public function rules(): array
     {
         return [
-            'customer_id'   => 'required|exists:users,id',
+            'customer_id' => ['required', 'exists:users,id'],
             'date' => ['required', 'date'],
-            'value' => ['required', 'integer', 'min:0'],
+
+            // New clear field name
+            'current_reading' => ['required', 'integer', 'min:0'],
+
+            // Old field, allowed only for compatibility
+            'value' => ['nullable', 'integer', 'min:0'],
+
             'status' => ['nullable', 'in:paid,unpaid'],
         ];
     }

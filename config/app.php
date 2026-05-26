@@ -56,7 +56,7 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Application Timezone
+    | Application Timezone (We are PH, so it should be MN time)
     |--------------------------------------------------------------------------
     |
     | Here you may specify the default timezone for your application, which
@@ -65,7 +65,7 @@ return [
     |
     */
 
-    'timezone' => 'UTC',
+    'timezone' => env('APP_TIMEZONE', 'Asia/Manila'),
 
     /*
     |--------------------------------------------------------------------------
