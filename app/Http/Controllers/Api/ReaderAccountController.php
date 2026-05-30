@@ -486,4 +486,103 @@ class ReaderAccountController extends Controller
             'total' => $accounts->count(),
         ]);
     }
+
+    public function untaggedMeters(Request $request)
+    {
+        $reader = $request->user();
+
+        $role = strtolower((string) $reader->role);
+
+        if ($role !== 'reader') {
+            return response()->json([
+                'message' => 'Forbidden. Only reader accounts can access this resource.',
+            ], 403);
+        }
+
+        $taggedBarangays = $reader->tagged_barangays;
+
+        if (is_string($taggedBarangays)) {
+            $decoded = json_decode($taggedBarangays, true);
+
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $taggedBarangays = $decoded;
+            } else {
+                $taggedBarangays = array_map('trim', explode(',', $taggedBarangays));
+            }
+        }
+
+        if (!is_array($taggedBarangays)) {
+            $taggedBarangays = [];
+        }
+
+        $taggedBarangays = collect($taggedBarangays)
+            ->map(fn ($barangay) => trim((string) $barangay))
+            ->filter()
+            ->values()
+            ->all();
+
+        if (empty($taggedBarangays)) {
+            return response()->json([
+                'assigned_barangays' => [],
+                'count' => 0,
+                'data' => [],
+            ]);
+        }
+
+        $accounts = User::query()
+            ->whereIn('barangay', $taggedBarangays)
+            ->where(function ($query) {
+                $query->where('role', 'user')
+                    ->orWhere('role', 'users')
+                    ->orWhere('role', 'customer');
+            })
+            ->where(function ($query) {
+                $query->whereNull('status')
+                    ->orWhere('status', '!=', 'disconnected');
+            })
+
+            /*
+            * Untagged means latitude/longitude are missing or invalid.
+            * We intentionally check latitude/longitude only here.
+            */
+            ->where(function ($query) {
+                $query
+                    ->whereNull('latitude')
+                    ->orWhereNull('longitude')
+                    ->orWhere('latitude', '')
+                    ->orWhere('longitude', '')
+                    ->orWhere('latitude', 0)
+                    ->orWhere('longitude', 0);
+            })
+            ->orderBy('barangay')
+            ->orderBy('name')
+            ->get()
+            ->map(function ($account) {
+                return [
+                    'id' => $account->id,
+                    'name' => $account->name,
+                    'account_number' => $account->account_number,
+                    'barangay' => $account->barangay,
+                    'purok' => $account->purok,
+                    'address' => $account->address,
+                    'status' => $account->status,
+                    'badge' => $account->badge,
+                    'status_badges' => $account->badge,
+                    'latitude' => $account->latitude,
+                    'longitude' => $account->longitude,
+                    'x_coordinate' => $account->x_coordinate,
+                    'y_coordinate' => $account->y_coordinate,
+                    'has_coordinates' => false,
+                    'button_type' => 'tag_location',
+                    'button_label' => 'Tag Location',
+                ];
+            })
+            ->values();
+
+        return response()->json([
+            'assigned_barangays' => $taggedBarangays,
+            'count' => $accounts->count(),
+            'data' => $accounts,
+        ]);
+    }
 }

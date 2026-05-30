@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ClientDirectoryController;
 use App\Http\Controllers\Api\CustomerController;
+use App\Http\Controllers\Api\MapAccountController;
 use App\Http\Controllers\Api\NewApplicationController;
 use App\Http\Controllers\Api\ReaderAccountController;
 use App\Http\Controllers\Api\UserReadingController;
@@ -27,6 +28,9 @@ Route::prefix('v1')->group(function () {
 
         // Add this inside your existing auth:sanctum /api/v1 group:
         Route::get('/payment-history', [PaymentHistoryController::class, 'index']);
+
+        // Untagged Meters API list
+        Route::get('/reader/untagged-meters', [ReaderAccountController::class, 'untaggedMeters']);
         
    
 
@@ -96,6 +100,9 @@ Route::prefix('v1')->group(function () {
             Route::post('/admin/reader/accounts', [ReaderAccountController::class, 'store']);
 
             Route::post('/new-applications', [NewApplicationController::class, 'store']);
+
+            Route::get('/map-accounts', [MapAccountController::class, 'index']);
+            Route::patch('/map-accounts/{user}/coordinates', [MapAccountController::class, 'updateCoordinates']);
 
             // Route::delete('/admin/reader/accounts/{user}', [ReaderAccountController::class, 'destroy']);
         });

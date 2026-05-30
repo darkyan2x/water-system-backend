@@ -148,16 +148,17 @@ class CustomerController extends Controller
         $actorRole = strtolower((string) ($actor->role ?? ''));
 
         /*
-        * Reader safety net:
-        * Readers can only set up their assigned customer accounts.
-        * They can only update:
-        * - startingMeter
-        * - currentReading payload, which is your "Prev. Reading" field
-        * - latitude / longitude GPS coordinates
+        * Reader path:
         *
-        * After successful reader setup:
-        * - status = for_reading
-        * - badge = ["for_reading"]
+        * 1. If customer is still setup:
+        *    - reader can finish setup
+        *    - GPS is optional
+        *    - status becomes for_reading
+        *
+        * 2. If customer is no longer setup:
+        *    - reader can only update GPS coordinates
+        *    - status/readings/starting meter are NOT touched
+        *    - this supports Untagged Meters -> Tag Location
         */
         if ($actorRole === 'reader') {
             $taggedBarangays = $actor->tagged_barangays ?? [];
@@ -186,48 +187,118 @@ class CustomerController extends Controller
 
             abort_unless(in_array($customerBarangay, $allowedBarangays, true), 403);
 
-            if ($customer->status !== 'setup') {
+            /*
+            * Coordinates are considered supplied only when BOTH values are present.
+            */
+            $requestHasLatitude = $request->filled('latitude');
+            $requestHasLongitude = $request->filled('longitude');
+            $requestHasCoordinates = $requestHasLatitude && $requestHasLongitude;
+
+            /*
+            * If only one coordinate is supplied, reject it.
+            */
+            if ($requestHasLatitude xor $requestHasLongitude) {
                 return response()->json([
-                    'message' => 'This account is no longer available for setup.',
+                    'message' => 'Both latitude and longitude are required when setting coordinates.',
+                    'errors' => [
+                        'latitude' => ['Latitude and longitude must be supplied together.'],
+                        'longitude' => ['Latitude and longitude must be supplied together.'],
+                    ],
                 ], 422);
             }
 
+            /*
+            * CASE A:
+            * Reader is tagging coordinates for an account that is already setup/read/due/etc.
+            * This is the Untagged Meters -> Tag Location flow.
+            *
+            * Important:
+            * - Do NOT require status = setup
+            * - Do NOT update starting meter
+            * - Do NOT update previous reading
+            * - Do NOT change status/badges
+            */
+            if ($customer->status !== 'setup') {
+                if (!$requestHasCoordinates) {
+                    return response()->json([
+                        'message' => 'This account is no longer available for setup.',
+                    ], 422);
+                }
+
+                $data = $request->validate([
+                    'latitude' => ['required', 'numeric', 'between:-90,90'],
+                    'longitude' => ['required', 'numeric', 'between:-180,180'],
+                ]);
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                    $customer->latitude = $data['latitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                    $customer->longitude = $data['longitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                    $customer->x_coordinate = $data['latitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                    $customer->y_coordinate = $data['longitude'];
+                }
+
+                $customer->save();
+
+                return $this->show($customer->fresh());
+            }
+
+            /*
+            * CASE B:
+            * Normal reader setup flow.
+            * GPS is optional here.
+            */
             $data = $request->validate([
                 'startingMeter' => ['required', 'numeric', 'min:0'],
 
                 // This is the Prev. Reading field on your setup/edit form
                 'currentReading' => ['required', 'numeric', 'min:0'],
 
-                // GPS coordinates from reader setup map
-                'latitude' => ['required', 'numeric', 'between:-90,90'],
-                'longitude' => ['required', 'numeric', 'between:-180,180'],
+                // GPS coordinates are optional for setup.
+                // If one is supplied, the other must also be supplied.
+                'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
+                'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
             ]);
 
             $customer->starting_meter = $data['startingMeter'];
             $customer->previous_reading = $data['currentReading'];
 
             /*
-            * Save GPS coordinates.
-            * This supports both possible column naming styles:
-            * - latitude / longitude
-            * - x_coordinate / y_coordinate
-            *
-            * It will only write to columns that exist in your users table.
+            * Save GPS coordinates only when both latitude and longitude are provided.
+            * If GPS is not provided, do not touch existing coordinate fields.
             */
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
-                $customer->latitude = $data['latitude'];
-            }
+            $hasCoordinates =
+                array_key_exists('latitude', $data) &&
+                array_key_exists('longitude', $data) &&
+                $data['latitude'] !== null &&
+                $data['longitude'] !== null &&
+                $data['latitude'] !== '' &&
+                $data['longitude'] !== '';
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
-                $customer->longitude = $data['longitude'];
-            }
+            if ($hasCoordinates) {
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                    $customer->latitude = $data['latitude'];
+                }
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
-                $customer->x_coordinate = $data['latitude'];
-            }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                    $customer->longitude = $data['longitude'];
+                }
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
-                $customer->y_coordinate = $data['longitude'];
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                    $customer->x_coordinate = $data['latitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                    $customer->y_coordinate = $data['longitude'];
+                }
             }
 
             // Reader setup releases the account for normal reading.
@@ -284,9 +355,10 @@ class CustomerController extends Controller
                 ]),
             ],
 
-            // Optional GPS coordinates for admin edits too
-            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
-            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
+            // Optional GPS coordinates for admin edits too.
+            // If one is supplied, the other must also be supplied.
+            'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
         ]);
 
         $customer->name = $data['name'];
@@ -304,15 +376,18 @@ class CustomerController extends Controller
         $customer->status = $data['status'];
 
         /*
-        * Save GPS coordinates if provided.
-        * We only update coordinates when both values are present.
+        * Save GPS coordinates only when both latitude and longitude are provided.
+        * If no GPS values are sent, do not update coordinate fields.
         */
-        if (
+        $hasCoordinates =
             array_key_exists('latitude', $data) &&
             array_key_exists('longitude', $data) &&
             $data['latitude'] !== null &&
-            $data['longitude'] !== null
-        ) {
+            $data['longitude'] !== null &&
+            $data['latitude'] !== '' &&
+            $data['longitude'] !== '';
+
+        if ($hasCoordinates) {
             if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
                 $customer->latitude = $data['latitude'];
             }

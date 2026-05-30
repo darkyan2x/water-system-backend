@@ -98,8 +98,9 @@ class ClientDirectoryController extends Controller
                 $query->where(function ($q) use ($search) {
                     $q->where('account_number', 'LIKE', "%{$search}%")
                         ->orWhere('name', 'LIKE', "%{$search}%")
-                        ->orWhere('first_name', 'LIKE', "%{$search}%")
-                        ->orWhere('last_name', 'LIKE', "%{$search}%");
+                        // ->orWhere('first_name', 'LIKE', "%{$search}%")
+                        // ->orWhere('last_name', 'LIKE', "%{$search}%")
+                        ;
                 });
             })
 
