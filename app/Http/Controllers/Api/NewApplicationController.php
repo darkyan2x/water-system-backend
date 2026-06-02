@@ -25,6 +25,15 @@ class NewApplicationController extends Controller
                 'unique:users,account_number',
             ],
 
+            // New optional meter number
+            'meter_no' => [
+                'nullable',
+                'string',
+                'max:255',
+                'regex:/^\S+$/',
+                'unique:users,meter_no',
+            ],
+
             'mobile' => [
                 'required',
                 'digits:11',
@@ -62,6 +71,10 @@ class NewApplicationController extends Controller
 
         return DB::transaction(function () use ($validated) {
             $accountNumber = trim($validated['account_number']);
+            $meterNo = isset($validated['meter_no']) && $validated['meter_no'] !== ''
+                ? trim($validated['meter_no'])
+                : null;
+
             $mobile = trim($validated['mobile']);
             $defaultPassword = substr($accountNumber, -5);
 
@@ -87,6 +100,10 @@ class NewApplicationController extends Controller
                 'name' => $validated['account_name'],
                 'account_name' => $validated['account_name'],
                 'account_number' => $accountNumber,
+
+                // New field
+                'meter_no' => $meterNo,
+
                 'mobile' => $mobile,
                 'account_type' => $validated['account_type'],
                 'barangay' => $validated['barangay'],
@@ -97,25 +114,14 @@ class NewApplicationController extends Controller
 
                 'billing_date' => $validated['billing_date'],
 
-                // Store null when previous_reading is blank/null/not provided.
-                // Do not default to 0.
                 'previous_reading' => $hasPreviousReading
                     ? $validated['previous_reading']
                     : null,
 
-                // Your DB enum column
                 'status' => $status,
-
-                //starting badge
                 'status_badges' => [$status],
-
-                // Required rule
                 'role' => 'user',
-
-                // Mobile login, password is last 5 chars of account_number
                 'password' => Hash::make($defaultPassword),
-
-                // Only needed if your users.email is still required
                 'email' => $mobile . '@bacong-water.local',
             ]);
 

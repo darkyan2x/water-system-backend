@@ -41,6 +41,7 @@ class User extends Authenticatable
         'previous_reading',
         'status',
         'status_badges',
+        'meter_no',
     ];
 
 

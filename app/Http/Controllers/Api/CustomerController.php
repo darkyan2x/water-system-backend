@@ -88,6 +88,7 @@ class CustomerController extends Controller
 
             'name' => $customer->name,
             'account_name' => $customer->account_name ?? $customer->name,
+            'meter_no' => $customer->meter_no ?? $customer->meter_no,
 
             // Keep both styles so current frontend will not break
             'accountNumber' => $customer->account_number,
@@ -150,15 +151,15 @@ class CustomerController extends Controller
         /*
         * Reader path:
         *
-        * 1. If customer is still setup:
-        *    - reader can finish setup
-        *    - GPS is optional
+        * 1. Normal setup flow:
+        *    - requires startingMeter + currentReading
+        *    - GPS optional
         *    - status becomes for_reading
         *
-        * 2. If customer is no longer setup:
-        *    - reader can only update GPS coordinates
+        * 2. Untagged Coordinates flow:
+        *    - coordinates-only update is allowed
+        *    - startingMeter/currentReading are NOT required
         *    - status/readings/starting meter are NOT touched
-        *    - this supports Untagged Meters -> Tag Location
         */
         if ($actorRole === 'reader') {
             $taggedBarangays = $actor->tagged_barangays ?? [];
@@ -187,16 +188,10 @@ class CustomerController extends Controller
 
             abort_unless(in_array($customerBarangay, $allowedBarangays, true), 403);
 
-            /*
-            * Coordinates are considered supplied only when BOTH values are present.
-            */
             $requestHasLatitude = $request->filled('latitude');
             $requestHasLongitude = $request->filled('longitude');
             $requestHasCoordinates = $requestHasLatitude && $requestHasLongitude;
 
-            /*
-            * If only one coordinate is supplied, reject it.
-            */
             if ($requestHasLatitude xor $requestHasLongitude) {
                 return response()->json([
                     'message' => 'Both latitude and longitude are required when setting coordinates.',
@@ -207,17 +202,38 @@ class CustomerController extends Controller
                 ], 422);
             }
 
-            /*
-            * CASE A:
-            * Reader is tagging coordinates for an account that is already setup/read/due/etc.
-            * This is the Untagged Meters -> Tag Location flow.
-            *
-            * Important:
-            * - Do NOT require status = setup
-            * - Do NOT update starting meter
-            * - Do NOT update previous reading
-            * - Do NOT change status/badges
-            */
+            $isCoordinatesOnlyUpdate =
+                $requestHasCoordinates &&
+                !$request->has('startingMeter') &&
+                !$request->has('currentReading');
+
+            if ($isCoordinatesOnlyUpdate) {
+                $data = $request->validate([
+                    'latitude' => ['required', 'numeric', 'between:-90,90'],
+                    'longitude' => ['required', 'numeric', 'between:-180,180'],
+                ]);
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                    $customer->latitude = $data['latitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                    $customer->longitude = $data['longitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                    $customer->x_coordinate = $data['latitude'];
+                }
+
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                    $customer->y_coordinate = $data['longitude'];
+                }
+
+                $customer->save();
+
+                return $this->show($customer->fresh());
+            }
+
             if ($customer->status !== 'setup') {
                 if (!$requestHasCoordinates) {
                     return response()->json([
@@ -251,19 +267,10 @@ class CustomerController extends Controller
                 return $this->show($customer->fresh());
             }
 
-            /*
-            * CASE B:
-            * Normal reader setup flow.
-            * GPS is optional here.
-            */
             $data = $request->validate([
                 'startingMeter' => ['required', 'numeric', 'min:0'],
-
-                // This is the Prev. Reading field on your setup/edit form
                 'currentReading' => ['required', 'numeric', 'min:0'],
 
-                // GPS coordinates are optional for setup.
-                // If one is supplied, the other must also be supplied.
                 'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
                 'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
             ]);
@@ -271,10 +278,6 @@ class CustomerController extends Controller
             $customer->starting_meter = $data['startingMeter'];
             $customer->previous_reading = $data['currentReading'];
 
-            /*
-            * Save GPS coordinates only when both latitude and longitude are provided.
-            * If GPS is not provided, do not touch existing coordinate fields.
-            */
             $hasCoordinates =
                 array_key_exists('latitude', $data) &&
                 array_key_exists('longitude', $data) &&
@@ -301,7 +304,6 @@ class CustomerController extends Controller
                 }
             }
 
-            // Reader setup releases the account for normal reading.
             $customer->status = 'for_reading';
             $customer->status_badges = ['for_reading'];
 
@@ -312,8 +314,17 @@ class CustomerController extends Controller
 
         /*
         * Admin/master/operator path:
-        * Keep existing full edit behavior.
+        * Full edit behavior.
+        * Meter No is editable here.
         */
+
+        // Accept either meterNo or meter_no from frontend.
+        if ($request->has('meter_no') && !$request->has('meterNo')) {
+            $request->merge([
+                'meterNo' => $request->input('meter_no'),
+            ]);
+        }
+
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
 
@@ -322,6 +333,14 @@ class CustomerController extends Controller
                 'string',
                 'max:50',
                 Rule::unique('users', 'account_number')->ignore($customer->id),
+            ],
+
+            'meterNo' => [
+                'nullable',
+                'string',
+                'max:255',
+                'regex:/^\S+$/',
+                Rule::unique('users', 'meter_no')->ignore($customer->id),
             ],
 
             'accountType' => [
@@ -340,7 +359,6 @@ class CustomerController extends Controller
             'startingMeter' => ['required', 'numeric', 'min:0'],
             'billingDate' => ['required', 'integer', 'min:1', 'max:31'],
 
-            // This is the Prev. Reading field on your edit form
             'currentReading' => ['required', 'numeric', 'min:0'],
 
             'status' => [
@@ -355,16 +373,21 @@ class CustomerController extends Controller
                 ]),
             ],
 
-            // Optional GPS coordinates for admin edits too.
-            // If one is supplied, the other must also be supplied.
-            'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
-            'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
+            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
         ]);
 
         $customer->name = $data['name'];
         $customer->account_name = $data['name'];
 
         $customer->account_number = $data['accountNumber'] ?? $customer->account_number;
+
+        if ($request->has('meterNo') || $request->has('meter_no')) {
+            $customer->meter_no = isset($data['meterNo']) && $data['meterNo'] !== ''
+                ? trim($data['meterNo'])
+                : null;
+        }
+
         $customer->account_type = $data['accountType'];
         $customer->barangay = $data['barangay'] ?? null;
         $customer->mobile = $data['contact'] ?? null;
@@ -375,10 +398,6 @@ class CustomerController extends Controller
 
         $customer->status = $data['status'];
 
-        /*
-        * Save GPS coordinates only when both latitude and longitude are provided.
-        * If no GPS values are sent, do not update coordinate fields.
-        */
         $hasCoordinates =
             array_key_exists('latitude', $data) &&
             array_key_exists('longitude', $data) &&
@@ -407,11 +426,6 @@ class CustomerController extends Controller
 
         $customer->save();
 
-        /*
-        * Refresh status_badges using centralized service for admin edits.
-        * We do not run this on reader setup because reader setup must force:
-        * status = for_reading, badge = ["for_reading"].
-        */
         app(CustomerStatusBadgeService::class)->refresh($customer->fresh());
 
         return $this->show($customer->fresh());

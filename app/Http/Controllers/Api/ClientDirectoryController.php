@@ -134,7 +134,7 @@ class ClientDirectoryController extends Controller
                     'barangay' => $client->barangay,
                     'status' => $client->status,
                     'status_badges' => $statusBadges,
-                    'bill_date' => $client->bill_date ?? $client->bill_day ?? null,
+                    'bill_date' => $client->billing_date ?? $client->billing_date ?? null,
                     'previous_reading' => $client->previous_reading,
 
                     // This is now total balance from all unpaid/partial readings

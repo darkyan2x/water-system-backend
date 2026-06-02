@@ -7,6 +7,7 @@ use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 class ReaderAccountController extends Controller
@@ -583,6 +584,165 @@ class ReaderAccountController extends Controller
             'assigned_barangays' => $taggedBarangays,
             'count' => $accounts->count(),
             'data' => $accounts,
+        ]);
+    }
+
+
+    public function authorizedAssignedMeterUpdate(Request $request, User $customer)
+    {
+        $reader = $request->user();
+
+        $role = strtolower((string) ($reader->role ?? ''));
+
+        if ($role !== 'reader') {
+            return response()->json([
+                'message' => 'Forbidden. Only reader accounts can access this resource.',
+            ], 403);
+        }
+
+        if (!in_array($customer->role, ['user', 'users', 'customer'], true)) {
+            return response()->json([
+                'message' => 'Customer account not found.',
+            ], 404);
+        }
+
+        /*
+        * Check if this customer belongs to one of the reader's assigned barangays.
+        */
+        $taggedBarangays = $reader->tagged_barangays ?? [];
+
+        if (is_string($taggedBarangays)) {
+            $decoded = json_decode($taggedBarangays, true);
+
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $taggedBarangays = $decoded;
+            } else {
+                $taggedBarangays = array_filter(array_map('trim', explode(',', $taggedBarangays)));
+            }
+        }
+
+        if (!is_array($taggedBarangays)) {
+            $taggedBarangays = [];
+        }
+
+        $allowedBarangays = collect($taggedBarangays)
+            ->map(fn ($barangay) => strtolower(trim((string) $barangay)))
+            ->filter()
+            ->values()
+            ->all();
+
+        $customerBarangay = strtolower(trim((string) $customer->barangay));
+
+        if (!in_array($customerBarangay, $allowedBarangays, true)) {
+            return response()->json([
+                'message' => 'Forbidden. This account is not assigned to your barangay list.',
+            ], 403);
+        }
+
+        /*
+        * Assigned Meters edit requires the logged-in reader's actual password.
+        */
+        $validatedPassword = $request->validate([
+            'authorization_password' => ['required', 'string'],
+        ]);
+
+        if (!Hash::check($validatedPassword['authorization_password'], $reader->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+                'errors' => [
+                    'authorization_password' => [
+                        'The password you entered is incorrect.',
+                    ],
+                ],
+            ], 422);
+        }
+
+        /*
+        * Validate editable Assigned Meters fields.
+        * All fields are optional except authorization_password.
+        */
+        $data = $request->validate([
+            'startingMeter' => ['nullable', 'numeric', 'min:0'],
+            'currentReading' => ['nullable', 'numeric', 'min:0'],
+
+            /*
+            * Coordinates are optional.
+            * If one coordinate is sent, the other must also be sent.
+            */
+            'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
+        ]);
+
+        /*
+        * Update Starting Meter if sent.
+        */
+        if ($request->has('startingMeter')) {
+            $customer->starting_meter = $data['startingMeter'] ?? 0;
+        }
+
+        /*
+        * Update Prev. Reading if sent.
+        * Frontend sends this as currentReading.
+        */
+        if ($request->has('currentReading')) {
+            $customer->previous_reading = $data['currentReading'] ?? 0;
+        }
+
+        /*
+        * Update GPS only if both latitude and longitude are present.
+        */
+        $hasCoordinates =
+            array_key_exists('latitude', $data) &&
+            array_key_exists('longitude', $data) &&
+            $data['latitude'] !== null &&
+            $data['longitude'] !== null &&
+            $data['latitude'] !== '' &&
+            $data['longitude'] !== '';
+
+        if ($hasCoordinates) {
+            if (Schema::hasColumn('users', 'latitude')) {
+                $customer->latitude = $data['latitude'];
+            }
+
+            if (Schema::hasColumn('users', 'longitude')) {
+                $customer->longitude = $data['longitude'];
+            }
+
+            if (Schema::hasColumn('users', 'x_coordinate')) {
+                $customer->x_coordinate = $data['latitude'];
+            }
+
+            if (Schema::hasColumn('users', 'y_coordinate')) {
+                $customer->y_coordinate = $data['longitude'];
+            }
+        }
+
+        /*
+        * Important:
+        * Do NOT change status here.
+        * Do NOT change badge/status_badges here.
+        * Assigned Meters edit is only for meter baseline/prev reading/GPS adjustment.
+        */
+        $customer->save();
+
+        return response()->json([
+            'message' => 'Assigned meter updated successfully.',
+            'data' => [
+                'id' => $customer->id,
+                'name' => $customer->name,
+                'account_number' => $customer->account_number,
+                'barangay' => $customer->barangay,
+                'purok' => $customer->purok,
+                'status' => $customer->status,
+                'badge' => $customer->badge,
+                'status_badges' => $customer->badge,
+                'starting_meter' => $customer->starting_meter,
+                'previous_reading' => $customer->previous_reading,
+                'latitude' => $customer->latitude,
+                'longitude' => $customer->longitude,
+                'x_coordinate' => $customer->x_coordinate,
+                'y_coordinate' => $customer->y_coordinate,
+            ],
         ]);
     }
 }

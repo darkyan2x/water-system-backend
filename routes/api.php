@@ -31,6 +31,9 @@ Route::prefix('v1')->group(function () {
 
         // Untagged Meters API list
         Route::get('/reader/untagged-meters', [ReaderAccountController::class, 'untaggedMeters']);
+
+        // Updating using reader account
+        Route::patch('/reader/assigned-meters/{customer}/authorized-update', [ReaderAccountController::class, 'authorizedAssignedMeterUpdate']);
         
    
 
