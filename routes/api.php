@@ -96,6 +96,8 @@ Route::prefix('v1')->group(function () {
         Route::middleware('role:master,admin')->group(function () {
             Route::get('/clients-directory', [ClientDirectoryController::class, 'index']);
 
+            Route::delete('/customers/{customer}', [CustomerController::class, 'destroy']);
+
 
             Route::get('/admin/reader/accounts', [ReaderAccountController::class, 'index']);
             Route::put('/admin/reader/accounts/{user}', [ReaderAccountController::class, 'update']);

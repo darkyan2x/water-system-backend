@@ -276,13 +276,24 @@ class ReaderAccountController extends Controller
 
         $query = User::query()
             ->where('role', 'user')
-            ->where('status', 'setup')
-            ->whereIn('barangay', $taggedBarangays);
+            ->whereIn('barangay', $taggedBarangays)
+
+            /*
+            * Meters for Setup rule:
+            * List all assigned customer accounts where previous_reading is 0 or NULL.
+            * Status is intentionally ignored.
+            */
+            ->where(function ($q) {
+                $q->whereNull('previous_reading')
+                    ->orWhere('previous_reading', 0);
+            });
 
         if ($search !== '') {
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('account_name', 'like', "%{$search}%")
                     ->orWhere('account_number', 'like', "%{$search}%")
+                    ->orWhere('meter_no', 'like', "%{$search}%")
                     ->orWhere('mobile', 'like', "%{$search}%")
                     ->orWhere('purok', 'like', "%{$search}%")
                     ->orWhere('barangay', 'like', "%{$search}%");
@@ -299,20 +310,35 @@ class ReaderAccountController extends Controller
                 return [
                     'id' => $account->id,
                     'name' => $account->name,
+                    'account_name' => $account->account_name,
                     'account_number' => $account->account_number,
                     'accountNumber' => $account->account_number,
+
+                    'meter_no' => $account->meter_no,
+                    'meterNo' => $account->meter_no,
+
                     'mobile' => $account->mobile,
                     'barangay' => $account->barangay,
                     'purok' => $account->purok,
                     'address' => $account->address,
                     'status' => $account->status,
                     'badge' => $account->badge,
+                    'status_badges' => $account->status_badges ?? $account->badge,
+
                     'account_type' => $account->account_type,
                     'billing_date' => $account->billing_date,
+
+                    'starting_meter' => $account->starting_meter,
                     'previous_reading' => $account->previous_reading,
                     'current_reading' => $account->current_reading,
+
+                    'latitude' => $account->latitude,
+                    'longitude' => $account->longitude,
+                    'x_coordinate' => $account->x_coordinate,
+                    'y_coordinate' => $account->y_coordinate,
                 ];
             })->values(),
+
             'assigned_barangays' => $taggedBarangays,
             'total' => $accounts->total(),
             'current_page' => $accounts->currentPage(),
@@ -659,26 +685,18 @@ class ReaderAccountController extends Controller
 
         /*
         * Validate editable Assigned Meters fields.
-        * All fields are optional except authorization_password.
+        * - Prev. Reading is optional and editable.
+        * - GPS is optional.
+        * - clear_coordinates=true intentionally removes/nullifies saved GPS.
+        * - Starting Meter is intentionally NOT updated here because it is locked in Assigned Meters edit.
         */
         $data = $request->validate([
-            'startingMeter' => ['nullable', 'numeric', 'min:0'],
+            'startingMeter' => ['nullable', 'numeric', 'min:0'], // accepted for old frontend payloads, but ignored below
             'currentReading' => ['nullable', 'numeric', 'min:0'],
-
-            /*
-            * Coordinates are optional.
-            * If one coordinate is sent, the other must also be sent.
-            */
-            'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
-            'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
+            'clear_coordinates' => ['nullable', 'boolean'],
+            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
         ]);
-
-        /*
-        * Update Starting Meter if sent.
-        */
-        if ($request->has('startingMeter')) {
-            $customer->starting_meter = $data['startingMeter'] ?? 0;
-        }
 
         /*
         * Update Prev. Reading if sent.
@@ -689,17 +707,51 @@ class ReaderAccountController extends Controller
         }
 
         /*
-        * Update GPS only if both latitude and longitude are present.
+        * Coordinate behavior:
+        * 1. clear_coordinates=true => set all coordinate columns to NULL.
+        * 2. latitude + longitude present => update all coordinate columns.
+        * 3. neither present => keep existing coordinates unchanged.
+        * 4. only one coordinate present => validation error.
         */
-        $hasCoordinates =
+        $shouldClearCoordinates = $request->boolean('clear_coordinates');
+
+        $latitudeProvided =
             array_key_exists('latitude', $data) &&
-            array_key_exists('longitude', $data) &&
             $data['latitude'] !== null &&
+            $data['latitude'] !== '';
+
+        $longitudeProvided =
+            array_key_exists('longitude', $data) &&
             $data['longitude'] !== null &&
-            $data['latitude'] !== '' &&
             $data['longitude'] !== '';
 
-        if ($hasCoordinates) {
+        if (!$shouldClearCoordinates && ($latitudeProvided xor $longitudeProvided)) {
+            return response()->json([
+                'message' => 'Both latitude and longitude are required when setting coordinates.',
+                'errors' => [
+                    'latitude' => ['Latitude and longitude must be supplied together.'],
+                    'longitude' => ['Latitude and longitude must be supplied together.'],
+                ],
+            ], 422);
+        }
+
+        if ($shouldClearCoordinates) {
+            if (Schema::hasColumn('users', 'latitude')) {
+                $customer->latitude = null;
+            }
+
+            if (Schema::hasColumn('users', 'longitude')) {
+                $customer->longitude = null;
+            }
+
+            if (Schema::hasColumn('users', 'x_coordinate')) {
+                $customer->x_coordinate = null;
+            }
+
+            if (Schema::hasColumn('users', 'y_coordinate')) {
+                $customer->y_coordinate = null;
+            }
+        } elseif ($latitudeProvided && $longitudeProvided) {
             if (Schema::hasColumn('users', 'latitude')) {
                 $customer->latitude = $data['latitude'];
             }
@@ -721,7 +773,7 @@ class ReaderAccountController extends Controller
         * Important:
         * Do NOT change status here.
         * Do NOT change badge/status_badges here.
-        * Assigned Meters edit is only for meter baseline/prev reading/GPS adjustment.
+        * Do NOT update starting_meter here.
         */
         $customer->save();
 
@@ -731,6 +783,8 @@ class ReaderAccountController extends Controller
                 'id' => $customer->id,
                 'name' => $customer->name,
                 'account_number' => $customer->account_number,
+                'meter_no' => $customer->meter_no,
+                'meterNo' => $customer->meter_no,
                 'barangay' => $customer->barangay,
                 'purok' => $customer->purok,
                 'status' => $customer->status,
@@ -745,4 +799,5 @@ class ReaderAccountController extends Controller
             ],
         ]);
     }
+
 }

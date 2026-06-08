@@ -8,6 +8,9 @@ use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\CustomerFromUserResource;
 use App\Services\CustomerStatusBadgeService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 
 class CustomerController extends Controller
 {
@@ -34,6 +37,7 @@ class CustomerController extends Controller
                 'id',
                 'name',
                 'account_number',
+                'meter_no',
                 'purok',
                 'barangay',
                 'role',
@@ -68,6 +72,8 @@ class CustomerController extends Controller
         ]);
     }
 
+    
+
     /**
      * GET /api/v1/customers/{customer}
      */
@@ -88,7 +94,8 @@ class CustomerController extends Controller
 
             'name' => $customer->name,
             'account_name' => $customer->account_name ?? $customer->name,
-            'meter_no' => $customer->meter_no ?? $customer->meter_no,
+            'meter_no' => $customer->meter_no,
+            'meterNo' => $customer->meter_no,
 
             // Keep both styles so current frontend will not break
             'accountNumber' => $customer->account_number,
@@ -213,19 +220,19 @@ class CustomerController extends Controller
                     'longitude' => ['required', 'numeric', 'between:-180,180'],
                 ]);
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                if (Schema::hasColumn('users', 'latitude')) {
                     $customer->latitude = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                if (Schema::hasColumn('users', 'longitude')) {
                     $customer->longitude = $data['longitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                if (Schema::hasColumn('users', 'x_coordinate')) {
                     $customer->x_coordinate = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                if (Schema::hasColumn('users', 'y_coordinate')) {
                     $customer->y_coordinate = $data['longitude'];
                 }
 
@@ -246,19 +253,19 @@ class CustomerController extends Controller
                     'longitude' => ['required', 'numeric', 'between:-180,180'],
                 ]);
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                if (Schema::hasColumn('users', 'latitude')) {
                     $customer->latitude = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                if (Schema::hasColumn('users', 'longitude')) {
                     $customer->longitude = $data['longitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                if (Schema::hasColumn('users', 'x_coordinate')) {
                     $customer->x_coordinate = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                if (Schema::hasColumn('users', 'y_coordinate')) {
                     $customer->y_coordinate = $data['longitude'];
                 }
 
@@ -287,25 +294,25 @@ class CustomerController extends Controller
                 $data['longitude'] !== '';
 
             if ($hasCoordinates) {
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+                if (Schema::hasColumn('users', 'latitude')) {
                     $customer->latitude = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+                if (Schema::hasColumn('users', 'longitude')) {
                     $customer->longitude = $data['longitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+                if (Schema::hasColumn('users', 'x_coordinate')) {
                     $customer->x_coordinate = $data['latitude'];
                 }
 
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+                if (Schema::hasColumn('users', 'y_coordinate')) {
                     $customer->y_coordinate = $data['longitude'];
                 }
             }
 
-            $customer->status = 'for_reading';
-            $customer->status_badges = ['for_reading'];
+            $customer->status = 'ok';
+            $customer->status_badges = ['ok'];
 
             $customer->save();
 
@@ -316,7 +323,28 @@ class CustomerController extends Controller
         * Admin/master/operator path:
         * Full edit behavior.
         * Meter No is editable here.
+        * Requires the logged-in admin/operator/master password.
         */
+        if (!in_array($actorRole, ['master', 'admin', 'operator'], true)) {
+            return response()->json([
+                'message' => 'Forbidden.',
+            ], 403);
+        }
+
+        $authData = $request->validate([
+            'authorization_password' => ['required', 'string'],
+        ]);
+
+        if (!Hash::check($authData['authorization_password'], $actor->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+                'errors' => [
+                    'authorization_password' => [
+                        'The password you entered is incorrect.',
+                    ],
+                ],
+            ], 422);
+        }
 
         // Accept either meterNo or meter_no from frontend.
         if ($request->has('meter_no') && !$request->has('meterNo')) {
@@ -375,6 +403,7 @@ class CustomerController extends Controller
 
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
             'longitude' => ['nullable', 'numeric', 'between:-180,180'],
+            'clear_coordinates' => ['nullable', 'boolean'],
         ]);
 
         $customer->name = $data['name'];
@@ -398,7 +427,10 @@ class CustomerController extends Controller
 
         $customer->status = $data['status'];
 
+        $shouldClearCoordinates = $request->boolean('clear_coordinates');
+
         $hasCoordinates =
+            !$shouldClearCoordinates &&
             array_key_exists('latitude', $data) &&
             array_key_exists('longitude', $data) &&
             $data['latitude'] !== null &&
@@ -406,20 +438,36 @@ class CustomerController extends Controller
             $data['latitude'] !== '' &&
             $data['longitude'] !== '';
 
-        if ($hasCoordinates) {
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'latitude')) {
+        if ($shouldClearCoordinates) {
+            if (Schema::hasColumn('users', 'latitude')) {
+                $customer->latitude = null;
+            }
+
+            if (Schema::hasColumn('users', 'longitude')) {
+                $customer->longitude = null;
+            }
+
+            if (Schema::hasColumn('users', 'x_coordinate')) {
+                $customer->x_coordinate = null;
+            }
+
+            if (Schema::hasColumn('users', 'y_coordinate')) {
+                $customer->y_coordinate = null;
+            }
+        } elseif ($hasCoordinates) {
+            if (Schema::hasColumn('users', 'latitude')) {
                 $customer->latitude = $data['latitude'];
             }
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'longitude')) {
+            if (Schema::hasColumn('users', 'longitude')) {
                 $customer->longitude = $data['longitude'];
             }
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'x_coordinate')) {
+            if (Schema::hasColumn('users', 'x_coordinate')) {
                 $customer->x_coordinate = $data['latitude'];
             }
 
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'y_coordinate')) {
+            if (Schema::hasColumn('users', 'y_coordinate')) {
                 $customer->y_coordinate = $data['longitude'];
             }
         }
@@ -430,4 +478,89 @@ class CustomerController extends Controller
 
         return $this->show($customer->fresh());
     }
+    /**
+     * DELETE /api/v1/customers/{customer}
+     */
+    public function destroy(Request $request, User $customer)
+    {
+        abort_unless($customer->role === 'user', 404);
+
+        $actor = $request->user();
+        $actorRole = strtolower((string) ($actor->role ?? ''));
+
+        if (!in_array($actorRole, ['master', 'admin', 'operator'], true)) {
+            return response()->json([
+                'message' => 'Forbidden.',
+            ], 403);
+        }
+
+        $data = $request->validate([
+            'authorization_password' => ['required', 'string'],
+        ]);
+
+        if (!Hash::check($data['authorization_password'], $actor->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+                'errors' => [
+                    'authorization_password' => [
+                        'The password you entered is incorrect.',
+                    ],
+                ],
+            ], 422);
+        }
+
+        DB::transaction(function () use ($customer) {
+            /*
+             * Delete related billing/history records first, so the customer delete
+             * will not fail on foreign key constraints.
+             */
+            $readingIds = collect();
+
+            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
+                $readingIds = DB::table('readings')
+                    ->where('user_id', $customer->id)
+                    ->pluck('id');
+            }
+
+            foreach (['payments', 'reading_payments'] as $paymentTable) {
+                if (!Schema::hasTable($paymentTable)) {
+                    continue;
+                }
+
+                if (Schema::hasColumn($paymentTable, 'user_id')) {
+                    DB::table($paymentTable)
+                        ->where('user_id', $customer->id)
+                        ->delete();
+                }
+
+                if (Schema::hasColumn($paymentTable, 'customer_id')) {
+                    DB::table($paymentTable)
+                        ->where('customer_id', $customer->id)
+                        ->delete();
+                }
+
+                if (
+                    $readingIds->isNotEmpty() &&
+                    Schema::hasColumn($paymentTable, 'reading_id')
+                ) {
+                    DB::table($paymentTable)
+                        ->whereIn('reading_id', $readingIds)
+                        ->delete();
+                }
+            }
+
+            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
+                DB::table('readings')
+                    ->where('user_id', $customer->id)
+                    ->delete();
+            }
+
+            $customer->delete();
+        });
+
+        return response()->json([
+            'message' => 'Customer account deleted successfully.',
+        ]);
+    }
+
 }
