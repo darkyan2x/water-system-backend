@@ -109,6 +109,8 @@ Route::prefix('v1')->group(function () {
             Route::get('/map-accounts', [MapAccountController::class, 'index']);
             Route::patch('/map-accounts/{user}/coordinates', [MapAccountController::class, 'updateCoordinates']);
 
+            Route::patch('/customers/{customer}/connection-status', [CustomerController::class, 'updateConnectionStatus']);
+
             // Route::delete('/admin/reader/accounts/{user}', [ReaderAccountController::class, 'destroy']);
         });
     });

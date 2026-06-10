@@ -38,6 +38,7 @@ class User extends Authenticatable
         'barangay',
         'starting_meter',
         'billing_date',
+        'next_reading_date',
         'previous_reading',
         'status',
         'status_badges',

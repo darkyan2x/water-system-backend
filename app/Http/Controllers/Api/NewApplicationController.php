@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\CustomerService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -96,12 +97,23 @@ class NewApplicationController extends Controller
                 ? ($validated['status'] ?? 'for_reading')
                 : 'setup';
 
+            $customerService = app(CustomerService::class);
+
+            $billingDay = (int) $validated['billing_date'];
+
+            $nextReadingDate = $customerService->getFirstNextReadingDate(
+                now(),
+                $billingDay
+            );
+
+            // New application should not immediately become for_reading.
+            // It waits for next_reading_date scheduler.
+            $status = $validated['status'] ?? 'setup';
+
             $user = User::create([
                 'name' => $validated['account_name'],
                 'account_name' => $validated['account_name'],
                 'account_number' => $accountNumber,
-
-                // New field
                 'meter_no' => $meterNo,
 
                 'mobile' => $mobile,
@@ -112,7 +124,8 @@ class NewApplicationController extends Controller
                     ? $validated['starting_meter']
                     : null,
 
-                'billing_date' => $validated['billing_date'],
+                'billing_date' => $billingDay,
+                'next_reading_date' => $nextReadingDate->toDateString(),
 
                 'previous_reading' => $hasPreviousReading
                     ? $validated['previous_reading']
@@ -120,6 +133,7 @@ class NewApplicationController extends Controller
 
                 'status' => $status,
                 'status_badges' => [$status],
+
                 'role' => 'user',
                 'password' => Hash::make($defaultPassword),
                 'email' => $mobile . '@bacong-water.local',

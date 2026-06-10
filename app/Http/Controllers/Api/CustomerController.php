@@ -563,4 +563,70 @@ class CustomerController extends Controller
         ]);
     }
 
+    public function updateConnectionStatus(Request $request, User $customer)
+    {
+        $validated = $request->validate([
+            'action' => ['required', Rule::in(['disconnect', 'reconnect'])],
+            'password' => ['required', 'string'],
+        ]);
+
+        $admin = $request->user();
+
+        if (!$admin || !Hash::check($validated['password'], $admin->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+            ], 422);
+        }
+
+        if ($customer->role !== 'user') {
+            return response()->json([
+                'message' => 'Only customer accounts can be disconnected or reconnected.',
+            ], 422);
+        }
+
+        $badges = $customer->status_badges;
+
+        if (is_string($badges)) {
+            $decoded = json_decode($badges, true);
+            $badges = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($badges)) {
+            $badges = [];
+        }
+
+        $badges = array_values(array_unique(array_filter($badges)));
+
+        if ($validated['action'] === 'disconnect') {
+            if (!in_array('disconnected', $badges, true)) {
+                $badges[] = 'disconnected';
+            }
+
+            $customer->forceFill([
+                'status' => 'disconnected',
+                'status_badges' => array_values(array_unique($badges)),
+            ])->save();
+
+            return response()->json([
+                'message' => 'Customer disconnected successfully.',
+                'user' => $customer->fresh(),
+            ]);
+        }
+
+        // reconnect
+        $badges = array_values(array_filter($badges, function ($badge) {
+            return $badge !== 'disconnected';
+        }));
+
+        $customer->forceFill([
+            'status' => 'ok',
+            'status_badges' => $badges,
+        ])->save();
+
+        return response()->json([
+            'message' => 'Customer reconnected successfully.',
+            'user' => $customer->fresh(),
+        ]);
+    }
+
 }
