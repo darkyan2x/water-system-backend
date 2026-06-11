@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\MapAccountController;
 use App\Http\Controllers\Api\NewApplicationController;
 use App\Http\Controllers\Api\ReaderAccountController;
+use App\Http\Controllers\Api\TariffController;
 use App\Http\Controllers\Api\UserReadingController;
 use App\Http\Controllers\Api\V1\CustomerBillingController;
 use App\Http\Controllers\Api\V1\PaymentHistoryController;
@@ -86,6 +87,8 @@ Route::prefix('v1')->group(function () {
 
         Route::get('/users/{user}/readings', [UserReadingController::class, 'index']);
 
+        Route::get('/tariffs', [TariffController::class, 'index']);
+
         /*
         |--------------------------------------------------------------------------
         | Admin Reader Account Management
@@ -112,6 +115,10 @@ Route::prefix('v1')->group(function () {
             Route::patch('/customers/{customer}/connection-status', [CustomerController::class, 'updateConnectionStatus']);
 
             // Route::delete('/admin/reader/accounts/{user}', [ReaderAccountController::class, 'destroy']);
+
+
+            
+            Route::put('/tariffs', [TariffController::class, 'update']);
         });
     });
 });
