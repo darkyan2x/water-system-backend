@@ -10,6 +10,7 @@ use App\Services\WaterBillCalculator;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class UserReadingController extends Controller
 {
@@ -175,6 +176,22 @@ class UserReadingController extends Controller
             $user->last_usage = $billResult['usage'];
 
             /*
+            * Set the customer's next reading date based on the reading date
+            * and the customer's assigned billing day.
+            *
+            * Example:
+            * Reading date: Jun 10, 2026
+            * Billing date: 10
+            * Next reading date: Jul 10, 2026
+            *
+            * If the billing day is 31 and the next month has fewer days,
+            * use the last valid day of that next month.
+            */
+            if (Schema::hasColumn('users', 'next_reading_date')) {
+                $user->next_reading_date = $this->resolveNextReadingDate($date, $user->billing_date);
+            }
+
+            /*
             * After reader punches reading:
             * for_reading becomes due because a new bill was created.
             */
@@ -224,6 +241,29 @@ class UserReadingController extends Controller
             'reading' => $result['reading'],
             'user' => $result['user'],
         ], 201);
+    }
+
+    private function resolveNextReadingDate(Carbon $readingDate, $billingDate): string
+    {
+        $billingDay = (int) ($billingDate ?: $readingDate->day);
+
+        if ($billingDay < 1) {
+            $billingDay = 1;
+        }
+
+        if ($billingDay > 31) {
+            $billingDay = 31;
+        }
+
+        $nextMonth = $readingDate->copy()
+            ->startOfMonth()
+            ->addMonthNoOverflow();
+
+        $day = min($billingDay, $nextMonth->daysInMonth);
+
+        return $nextMonth->copy()
+            ->day($day)
+            ->toDateString();
     }
 
     /**

@@ -8,6 +8,7 @@ use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\CustomerFromUserResource;
 use App\Services\CustomerStatusBadgeService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
@@ -275,8 +276,10 @@ class CustomerController extends Controller
             }
 
             $data = $request->validate([
-                'startingMeter' => ['required', 'numeric', 'min:0'],
-                'currentReading' => ['required', 'numeric', 'min:0'],
+                // Admin edit: optional. If not supplied, keep the existing value.
+            'startingMeter' => ['nullable', 'numeric', 'min:0'],
+                // Admin edit: optional. If not supplied, keep the existing value.
+            'currentReading' => ['nullable', 'numeric', 'min:0'],
 
                 'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
                 'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
@@ -384,10 +387,12 @@ class CustomerController extends Controller
             'barangay' => ['nullable', 'string', 'max:255'],
             'contact' => ['nullable', 'string', 'max:30'],
 
-            'startingMeter' => ['required', 'numeric', 'min:0'],
+            // Admin edit: optional. If not supplied, keep the existing value.
+            'startingMeter' => ['nullable', 'numeric', 'min:0'],
             'billingDate' => ['required', 'integer', 'min:1', 'max:31'],
 
-            'currentReading' => ['required', 'numeric', 'min:0'],
+            // Admin edit: optional. If not supplied, keep the existing value.
+            'currentReading' => ['nullable', 'numeric', 'min:0'],
 
             'status' => [
                 'required',
@@ -406,6 +411,8 @@ class CustomerController extends Controller
             'clear_coordinates' => ['nullable', 'boolean'],
         ]);
 
+        $oldBillingDate = $customer->billing_date;
+
         $customer->name = $data['name'];
         $customer->account_name = $data['name'];
 
@@ -421,9 +428,17 @@ class CustomerController extends Controller
         $customer->barangay = $data['barangay'] ?? null;
         $customer->mobile = $data['contact'] ?? null;
 
-        $customer->starting_meter = $data['startingMeter'] ?? 0;
+        // Admin edit: do not force Starting Meter / Current Reading.
+        // Only update them when the admin actually submits a value.
+        if ($request->filled('startingMeter')) {
+            $customer->starting_meter = $data['startingMeter'];
+        }
+
         $customer->billing_date = $data['billingDate'];
-        $customer->previous_reading = $data['currentReading'] ?? 0;
+
+        if ($request->filled('currentReading')) {
+            $customer->previous_reading = $data['currentReading'];
+        }
 
         $customer->status = $data['status'];
 
@@ -472,12 +487,100 @@ class CustomerController extends Controller
             }
         }
 
+        $newBillingDate = $customer->billing_date;
+
+        $billingDateChanged =
+            (string) ($oldBillingDate ?? '') !== (string) ($newBillingDate ?? '');
+
+        if (
+            $billingDateChanged &&
+            Schema::hasColumn('users', 'next_reading_date')
+        ) {
+            $customer->next_reading_date = $this->resolveNextReadingDateAfterBillingDateChange(
+                $customer,
+                $newBillingDate
+            );
+        }
+
         $customer->save();
 
         app(CustomerStatusBadgeService::class)->refresh($customer->fresh());
 
         return $this->show($customer->fresh());
     }
+
+    private function resolveNextReadingDateAfterBillingDateChange(User $customer, $billingDate): string
+    {
+        $billingDay = $this->normalizeBillingDay($billingDate);
+
+        $latestReading = $customer->readings()
+            ->orderByDesc('date')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($latestReading && $latestReading->date) {
+            return $this->resolveNextReadingDateFromBaseDate(
+                Carbon::parse($latestReading->date),
+                $billingDay
+            );
+        }
+
+        return $this->resolveNextUpcomingReadingDate($billingDay);
+    }
+
+    private function resolveNextReadingDateFromBaseDate(Carbon $baseDate, int $billingDay): string
+    {
+        $nextMonth = $baseDate->copy()
+            ->startOfMonth()
+            ->addMonthNoOverflow();
+
+        $day = min($billingDay, $nextMonth->daysInMonth);
+
+        return $nextMonth->copy()
+            ->day($day)
+            ->toDateString();
+    }
+
+    private function resolveNextUpcomingReadingDate(int $billingDay): string
+    {
+        $today = Carbon::today();
+
+        $currentMonthDay = min($billingDay, $today->daysInMonth);
+
+        $candidate = $today->copy()
+            ->startOfMonth()
+            ->day($currentMonthDay);
+
+        if ($candidate->lt($today)) {
+            $nextMonth = $today->copy()
+                ->startOfMonth()
+                ->addMonthNoOverflow();
+
+            $nextMonthDay = min($billingDay, $nextMonth->daysInMonth);
+
+            return $nextMonth->copy()
+                ->day($nextMonthDay)
+                ->toDateString();
+        }
+
+        return $candidate->toDateString();
+    }
+
+    private function normalizeBillingDay($billingDate): int
+    {
+        $billingDay = (int) ($billingDate ?: 1);
+
+        if ($billingDay < 1) {
+            return 1;
+        }
+
+        if ($billingDay > 31) {
+            return 31;
+        }
+
+        return $billingDay;
+    }
+
     /**
      * DELETE /api/v1/customers/{customer}
      */
