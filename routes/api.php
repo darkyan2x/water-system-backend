@@ -1,8 +1,11 @@
 <?php
 
+use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ClientDirectoryController;
 use App\Http\Controllers\Api\CustomerController;
+use App\Http\Controllers\Api\DataReportsController;
+use App\Http\Controllers\Api\GeneralPaymentHistoryController;
 use App\Http\Controllers\Api\MapAccountController;
 use App\Http\Controllers\Api\NewApplicationController;
 use App\Http\Controllers\Api\ReaderAccountController;
@@ -123,7 +126,21 @@ Route::prefix('v1')->group(function () {
             // Route::delete('/admin/reader/accounts/{user}', [ReaderAccountController::class, 'destroy']);
 
 
-            
+            // Dashboard admin route
+            Route::get(
+                '/admin/dashboard',
+                [AdminDashboardController::class, 'index']
+            );
+
+            // General Payment history admin route
+            Route::get(
+                '/payment-history',
+                [GeneralPaymentHistoryController::class, 'index']
+            );
+
+            // Data Reports admin route
+            Route::get('/reports/summary',[DataReportsController::class, 'index']);
+
             Route::put('/tariffs', [TariffController::class, 'update']);
         });
     });
