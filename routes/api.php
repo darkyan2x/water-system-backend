@@ -11,7 +11,11 @@ use App\Http\Controllers\Api\NewApplicationController;
 use App\Http\Controllers\Api\ReaderAccountController;
 use App\Http\Controllers\Api\ReaderReadingController;
 use App\Http\Controllers\Api\TariffController;
+use App\Http\Controllers\Api\UserBillsController;
+use App\Http\Controllers\Api\UserDashboardController;
+use App\Http\Controllers\Api\UserProfileController;
 use App\Http\Controllers\Api\UserReadingController;
+use App\Http\Controllers\Api\UserUsageController;
 use App\Http\Controllers\Api\V1\CustomerBillingController;
 use App\Http\Controllers\Api\V1\PaymentHistoryController;
 use App\Http\Controllers\Api\V1\ReadingPaymentController;
@@ -86,8 +90,19 @@ Route::prefix('v1')->group(function () {
 
 
 
-
-
+        // User Dashboard api
+        Route::get('/user/dashboard', [UserDashboardController::class, 'index']);
+        
+        // User Bills api
+        Route::get('/user/bills', [UserBillsController::class, 'index']);
+        
+        // User Usage api
+        Route::get('/user/usage', [UserUsageController::class, 'index']);
+        
+        // User profile api
+        Route::get('/user/profile', [UserProfileController::class, 'show']);
+        Route::patch('/user/profile/password', [UserProfileController::class, 'updatePassword']);
+        
 
         Route::get('/users/{user}/readings', [UserReadingController::class, 'index']);
 
