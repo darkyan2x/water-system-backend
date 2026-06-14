@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ClientDirectoryController;
@@ -102,7 +103,9 @@ Route::prefix('v1')->group(function () {
         // User profile api
         Route::get('/user/profile', [UserProfileController::class, 'show']);
         Route::patch('/user/profile/password', [UserProfileController::class, 'updatePassword']);
-        
+
+        // Acticity logs api
+        Route::get('/activity-logs', [ActivityLogController::class, 'index']);
 
         Route::get('/users/{user}/readings', [UserReadingController::class, 'index']);
 

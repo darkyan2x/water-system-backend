@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Reading;
 use App\Models\User;
+use App\Services\ActivityLogger;
 use App\Services\WaterBillCalculator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -45,7 +46,7 @@ class ReaderReadingController extends Controller
             ]);
         }
 
-        $result = DB::transaction(function () use ($reading, $validated, $auth, $role) {
+        $result = DB::transaction(function () use ($reading, $validated, $auth, $role, $request) {
             $lockedReading = Reading::whereKey($reading->id)
                 ->lockForUpdate()
                 ->firstOrFail();
@@ -130,6 +131,28 @@ class ReaderReadingController extends Controller
                 ];
             }
 
+            $oldReadingValues = [
+                'id' => $lockedReading->id,
+                'date' => $lockedReading->date,
+                'previous_reading' => $lockedReading->previous_reading ?? null,
+                'current_reading' => $lockedReading->current_reading ?? null,
+                'usage' => $lockedReading->usage ?? null,
+                'amount_due' => $lockedReading->amount_due ?? null,
+                'balance' => $lockedReading->balance ?? null,
+                'amount_paid' => $lockedReading->amount_paid ?? null,
+                'payment_status' => $lockedReading->payment_status ?? null,
+                'status' => $lockedReading->status ?? null,
+            ];
+
+            $oldCustomerValues = [
+                'previous_reading' => $user->previous_reading ?? null,
+                'current_reading' => $user->current_reading ?? null,
+                'last_usage' => $user->last_usage ?? null,
+                'status' => $user->status ?? null,
+                'status_badges' => $user->status_badges ?? null,
+                'balance' => $user->balance ?? null,
+            ];
+
             $oldReadingBalance = (float) ($lockedReading->balance ?? 0);
 
             $calculator = new WaterBillCalculator();
@@ -146,8 +169,23 @@ class ReaderReadingController extends Controller
 
             $lockedReading->previous_reading = $previousReading;
             $lockedReading->current_reading = $currentReading;
-            $lockedReading->usage = $newUsage;
-            $lockedReading->amount_due = $newCharge;
+
+            if (Schema::hasColumn('readings', 'usage')) {
+                $lockedReading->usage = $newUsage;
+            }
+
+            if (Schema::hasColumn('readings', 'consumption')) {
+                $lockedReading->consumption = $newUsage;
+            }
+
+            if (Schema::hasColumn('readings', 'amount_due')) {
+                $lockedReading->amount_due = $newCharge;
+            }
+
+            if (Schema::hasColumn('readings', 'amount')) {
+                $lockedReading->amount = $newCharge;
+            }
+
             $lockedReading->balance = $newReadingBalance;
             $lockedReading->amount_paid = 0;
             $lockedReading->payment_status = 'unpaid';
@@ -160,7 +198,6 @@ class ReaderReadingController extends Controller
 
             /*
              * Update customer display/cache values.
-             *
              * Keep users.previous_reading as the previous base used by this bill.
              * Only update users.current_reading to the corrected latest reading.
              */
@@ -195,9 +232,66 @@ class ReaderReadingController extends Controller
 
             $user->save();
 
+            $freshReading = $lockedReading->fresh();
+            $freshUser = $user->fresh();
+
+            $newReadingValues = [
+                'id' => $freshReading->id,
+                'date' => $freshReading->date,
+                'previous_reading' => $freshReading->previous_reading ?? null,
+                'current_reading' => $freshReading->current_reading ?? null,
+                'usage' => $freshReading->usage ?? ($freshReading->consumption ?? null),
+                'amount_due' => $freshReading->amount_due ?? ($freshReading->amount ?? null),
+                'balance' => $freshReading->balance ?? null,
+                'amount_paid' => $freshReading->amount_paid ?? null,
+                'payment_status' => $freshReading->payment_status ?? null,
+                'status' => $freshReading->status ?? null,
+            ];
+
+            $newCustomerValues = [
+                'previous_reading' => $freshUser->previous_reading ?? null,
+                'current_reading' => $freshUser->current_reading ?? null,
+                'last_usage' => $freshUser->last_usage ?? null,
+                'status' => $freshUser->status ?? null,
+                'status_badges' => $freshUser->status_badges ?? null,
+                'balance' => $freshUser->balance ?? null,
+            ];
+
+            ActivityLogger::log([
+                'module' => 'readings',
+                'action' => 'reading_corrected',
+                'target_user' => $freshUser,
+                'description' => sprintf(
+                    'Corrected latest unpaid reading for account %s.',
+                    $freshUser->account_number ?? $freshUser->account_name ?? $freshUser->name ?? $freshUser->id
+                ),
+                'old_values' => [
+                    'reading' => $oldReadingValues,
+                    'customer' => $oldCustomerValues,
+                ],
+                'new_values' => [
+                    'reading' => $newReadingValues,
+                    'customer' => $newCustomerValues,
+                ],
+                'metadata' => [
+                    'reading_id' => $freshReading->id,
+                    'customer_id' => $freshUser->id,
+                    'corrected_by_user_id' => $auth->id,
+                    'old_current_reading' => $oldReadingValues['current_reading'],
+                    'new_current_reading' => $newReadingValues['current_reading'],
+                    'old_usage' => $oldReadingValues['usage'],
+                    'new_usage' => $newUsage,
+                    'old_charge' => $oldReadingValues['amount_due'],
+                    'new_charge' => $newCharge,
+                    'old_reading_balance' => $oldReadingBalance,
+                    'new_reading_balance' => $newReadingBalance,
+                    'account_type' => $freshUser->account_type ?? null,
+                ],
+            ], $request);
+
             return [
-                'reading' => $lockedReading->fresh(),
-                'user' => $user->fresh(),
+                'reading' => $freshReading,
+                'user' => $freshUser,
                 'old_balance' => $oldReadingBalance,
                 'new_balance' => $newReadingBalance,
                 'new_charge' => $newCharge,

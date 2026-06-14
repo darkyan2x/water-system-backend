@@ -8,6 +8,7 @@ use App\Models\ReadingPayment;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\ActivityLogger;
 
 class CustomerBillingController extends Controller
 {
@@ -159,6 +160,18 @@ class CustomerBillingController extends Controller
             $paymentAmount = round((float) $validated['amount'], 2);
             $remainingPayment = $paymentAmount;
 
+            $customerBeforePayment = User::query()
+                ->whereKey($customer->id)
+                ->first();
+
+            $oldCustomerValues = $customerBeforePayment
+                ? [
+                    'status' => $customerBeforePayment->status,
+                    'status_badges' => $this->normalizeStatusBadges($customerBeforePayment->status_badges),
+                    'balance' => round((float) ($customerBeforePayment->balance ?? 0), 2),
+                ]
+                : [];
+
             $selectedReadingIds = $validated['selected_reading_ids']
                 ?? $validated['reading_ids']
                 ?? [];
@@ -234,6 +247,10 @@ class CustomerBillingController extends Controller
             }
 
             $createdPayments = [];
+            $paymentIds = [];
+            $paymentAllocations = [];
+            $oldReadingValues = [];
+            $newReadingValues = [];
 
             foreach ($payableReadings as $item) {
                 if ($remainingPayment <= 0) {
@@ -254,6 +271,16 @@ class CustomerBillingController extends Controller
                     continue;
                 }
 
+                $oldReadingValues[] = [
+                    'reading_id' => $reading->id,
+                    'date' => optional($reading->date)->format('Y-m-d') ?? $reading->date,
+                    'amount_due' => round((float) ($reading->amount_due ?? 0), 2),
+                    'amount_paid' => round((float) ($reading->amount_paid ?? 0), 2),
+                    'balance' => round((float) ($reading->balance ?? $readingBalance), 2),
+                    'payment_status' => $reading->payment_status,
+                    'status' => $reading->status,
+                ];
+
                 $payment = ReadingPayment::create([
                     'reading_id' => $reading->id,
                     'user_id' => $customer->id,
@@ -266,6 +293,7 @@ class CustomerBillingController extends Controller
                 ]);
 
                 $createdPayments[] = $payment;
+                $paymentIds[] = $payment->id;
 
                 $newAmountPaid = round(((float) $reading->amount_paid) + $allocationAmount, 2);
                 $amountDue = round((float) $reading->amount_due, 2);
@@ -295,6 +323,25 @@ class CustomerBillingController extends Controller
                     'status' => $safeReadingStatus,
                 ]);
 
+                $paymentAllocations[] = [
+                    'payment_id' => $payment->id,
+                    'reading_id' => $reading->id,
+                    'amount' => $allocationAmount,
+                    'payment_date' => $payment->payment_date,
+                    'payment_method' => $payment->payment_method,
+                    'or_number' => $payment->or_number,
+                ];
+
+                $newReadingValues[] = [
+                    'reading_id' => $reading->id,
+                    'date' => optional($reading->date)->format('Y-m-d') ?? $reading->date,
+                    'amount_due' => $amountDue,
+                    'amount_paid' => $newAmountPaid,
+                    'balance' => $newBalance,
+                    'payment_status' => $paymentStatus,
+                    'status' => $safeReadingStatus,
+                ];
+
                 $remainingPayment = round($remainingPayment - $allocationAmount, 2);
             }
 
@@ -304,12 +351,41 @@ class CustomerBillingController extends Controller
                 ->whereKey($customer->id)
                 ->first();
 
+            $newCustomerValues = $freshCustomer
+                ? [
+                    'status' => $freshCustomer->status,
+                    'status_badges' => $this->normalizeStatusBadges($freshCustomer->status_badges),
+                    'balance' => round((float) ($freshCustomer->balance ?? 0), 2),
+                ]
+                : [];
+
             return [
                 'error' => false,
                 'payments' => $createdPayments,
                 'customer' => $freshCustomer,
                 'amount_paid' => $paymentAmount,
                 'remaining_payment' => $remainingPayment,
+                'activity_log' => [
+                    'old_values' => [
+                        'customer' => $oldCustomerValues,
+                        'readings' => $oldReadingValues,
+                    ],
+                    'new_values' => [
+                        'customer' => $newCustomerValues,
+                        'readings' => $newReadingValues,
+                    ],
+                    'metadata' => [
+                        'payment_ids' => $paymentIds,
+                        'allocations' => $paymentAllocations,
+                        'requested_amount' => $paymentAmount,
+                        'remaining_payment' => $remainingPayment,
+                        'selected_reading_ids' => $selectedReadingIds,
+                        'payment_method' => $validated['payment_method'] ?? 'cash',
+                        'payment_date' => $validated['payment_date'] ?? now()->toDateString(),
+                        'or_number' => $validated['or_number'] ?? null,
+                        'remarks' => $validated['remarks'] ?? null,
+                    ],
+                ],
             ];
         });
 
@@ -319,6 +395,23 @@ class CustomerBillingController extends Controller
                 'balance' => $result['balance'] ?? null,
             ], $result['status'] ?? 422);
         }
+
+        $activityLog = $result['activity_log'] ?? [];
+
+        ActivityLogger::log([
+            'actor' => $auth,
+            'target_user' => $result['customer'] ?? $customer,
+            'module' => 'payments',
+            'action' => 'payment_created',
+            'description' => sprintf(
+                'Processed payment of ₱%s for customer %s.',
+                number_format((float) ($result['amount_paid'] ?? 0), 2),
+                $customer->account_number ?? $customer->account_name ?? $customer->name ?? $customer->id
+            ),
+            'old_values' => $activityLog['old_values'] ?? null,
+            'new_values' => $activityLog['new_values'] ?? null,
+            'metadata' => $activityLog['metadata'] ?? null,
+        ], $request);
 
         return response()->json([
             'message' => 'Payment processed successfully.',

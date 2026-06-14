@@ -8,6 +8,7 @@ use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\CustomerFromUserResource;
 use App\Services\CustomerStatusBadgeService;
+use App\Services\ActivityLogger;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -221,6 +222,8 @@ class CustomerController extends Controller
                     'longitude' => ['required', 'numeric', 'between:-180,180'],
                 ]);
 
+                $oldAuditValues = $this->auditCustomerValues($customer);
+
                 if (Schema::hasColumn('users', 'latitude')) {
                     $customer->latitude = $data['latitude'];
                 }
@@ -239,7 +242,20 @@ class CustomerController extends Controller
 
                 $customer->save();
 
-                return $this->show($customer->fresh());
+                $freshCustomer = $customer->fresh();
+
+                $this->logCustomerActivity(
+                    $request,
+                    'customer_coordinates_updated',
+                    'Reader updated meter GPS coordinates.',
+                    $freshCustomer,
+                    $oldAuditValues,
+                    [
+                        'source' => 'reader_coordinate_only_update',
+                    ]
+                );
+
+                return $this->show($freshCustomer);
             }
 
             if ($customer->status !== 'setup') {
@@ -254,6 +270,8 @@ class CustomerController extends Controller
                     'longitude' => ['required', 'numeric', 'between:-180,180'],
                 ]);
 
+                $oldAuditValues = $this->auditCustomerValues($customer);
+
                 if (Schema::hasColumn('users', 'latitude')) {
                     $customer->latitude = $data['latitude'];
                 }
@@ -272,18 +290,31 @@ class CustomerController extends Controller
 
                 $customer->save();
 
-                return $this->show($customer->fresh());
+                $freshCustomer = $customer->fresh();
+
+                $this->logCustomerActivity(
+                    $request,
+                    'customer_coordinates_updated',
+                    'Reader updated meter GPS coordinates.',
+                    $freshCustomer,
+                    $oldAuditValues,
+                    [
+                        'source' => 'reader_non_setup_coordinate_update',
+                    ]
+                );
+
+                return $this->show($freshCustomer);
             }
 
             $data = $request->validate([
-                // Admin edit: optional. If not supplied, keep the existing value.
-            'startingMeter' => ['nullable', 'numeric', 'min:0'],
-                // Admin edit: optional. If not supplied, keep the existing value.
-            'currentReading' => ['nullable', 'numeric', 'min:0'],
+                'startingMeter' => ['required', 'numeric', 'min:0'],
+                'currentReading' => ['required', 'numeric', 'min:0'],
 
                 'latitude' => ['nullable', 'required_with:longitude', 'numeric', 'between:-90,90'],
                 'longitude' => ['nullable', 'required_with:latitude', 'numeric', 'between:-180,180'],
             ]);
+
+            $oldAuditValues = $this->auditCustomerValues($customer);
 
             $customer->starting_meter = $data['startingMeter'];
             $customer->previous_reading = $data['currentReading'];
@@ -319,7 +350,20 @@ class CustomerController extends Controller
 
             $customer->save();
 
-            return $this->show($customer->fresh());
+            $freshCustomer = $customer->fresh();
+
+            $this->logCustomerActivity(
+                $request,
+                'customer_setup_completed',
+                'Reader completed customer meter setup.',
+                $freshCustomer,
+                $oldAuditValues,
+                [
+                    'source' => 'reader_setup',
+                ]
+            );
+
+            return $this->show($freshCustomer);
         }
 
         /*
@@ -387,11 +431,9 @@ class CustomerController extends Controller
             'barangay' => ['nullable', 'string', 'max:255'],
             'contact' => ['nullable', 'string', 'max:30'],
 
-            // Admin edit: optional. If not supplied, keep the existing value.
             'startingMeter' => ['nullable', 'numeric', 'min:0'],
             'billingDate' => ['required', 'integer', 'min:1', 'max:31'],
 
-            // Admin edit: optional. If not supplied, keep the existing value.
             'currentReading' => ['nullable', 'numeric', 'min:0'],
 
             'status' => [
@@ -411,6 +453,7 @@ class CustomerController extends Controller
             'clear_coordinates' => ['nullable', 'boolean'],
         ]);
 
+        $oldAuditValues = $this->auditCustomerValues($customer);
         $oldBillingDate = $customer->billing_date;
 
         $customer->name = $data['name'];
@@ -428,8 +471,6 @@ class CustomerController extends Controller
         $customer->barangay = $data['barangay'] ?? null;
         $customer->mobile = $data['contact'] ?? null;
 
-        // Admin edit: do not force Starting Meter / Current Reading.
-        // Only update them when the admin actually submits a value.
         if ($request->filled('startingMeter')) {
             $customer->starting_meter = $data['startingMeter'];
         }
@@ -504,16 +545,329 @@ class CustomerController extends Controller
 
         $customer->save();
 
-        app(CustomerStatusBadgeService::class)->refresh($customer->fresh());
+        $freshCustomer = $customer->fresh();
 
-        return $this->show($customer->fresh());
+        app(CustomerStatusBadgeService::class)->refresh($freshCustomer);
+
+        $freshCustomer = $customer->fresh();
+
+        $this->logCustomerActivity(
+            $request,
+            'customer_updated',
+            'Admin updated customer account details.',
+            $freshCustomer,
+            $oldAuditValues,
+            [
+                'source' => 'admin_customer_update',
+                'billing_date_changed' => $billingDateChanged,
+            ]
+        );
+
+        return $this->show($freshCustomer);
+    }
+    /**
+     * DELETE /api/v1/customers/{customer}
+     */
+    public function destroy(Request $request, User $customer)
+    {
+        abort_unless($customer->role === 'user', 404);
+
+        $actor = $request->user();
+        $actorRole = strtolower((string) ($actor->role ?? ''));
+
+        if (!in_array($actorRole, ['master', 'admin', 'operator'], true)) {
+            return response()->json([
+                'message' => 'Forbidden.',
+            ], 403);
+        }
+
+        $data = $request->validate([
+            'authorization_password' => ['required', 'string'],
+        ]);
+
+        if (!Hash::check($data['authorization_password'], $actor->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+                'errors' => [
+                    'authorization_password' => [
+                        'The password you entered is incorrect.',
+                    ],
+                ],
+            ], 422);
+        }
+
+        $oldAuditValues = $this->auditCustomerValues($customer);
+        $targetAccountNumber = $customer->account_number;
+        $targetAccountName = $customer->account_name ?? $customer->name;
+
+        DB::transaction(function () use ($customer) {
+            /*
+             * Delete related billing/history records first, so the customer delete
+             * will not fail on foreign key constraints.
+             */
+            $readingIds = collect();
+
+            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
+                $readingIds = DB::table('readings')
+                    ->where('user_id', $customer->id)
+                    ->pluck('id');
+            }
+
+            foreach (['payments', 'reading_payments'] as $paymentTable) {
+                if (!Schema::hasTable($paymentTable)) {
+                    continue;
+                }
+
+                if (Schema::hasColumn($paymentTable, 'user_id')) {
+                    DB::table($paymentTable)
+                        ->where('user_id', $customer->id)
+                        ->delete();
+                }
+
+                if (Schema::hasColumn($paymentTable, 'customer_id')) {
+                    DB::table($paymentTable)
+                        ->where('customer_id', $customer->id)
+                        ->delete();
+                }
+
+                if (
+                    $readingIds->isNotEmpty() &&
+                    Schema::hasColumn($paymentTable, 'reading_id')
+                ) {
+                    DB::table($paymentTable)
+                        ->whereIn('reading_id', $readingIds)
+                        ->delete();
+                }
+            }
+
+            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
+                DB::table('readings')
+                    ->where('user_id', $customer->id)
+                    ->delete();
+            }
+
+            $customer->delete();
+        });
+
+        ActivityLogger::log([
+            'module' => 'customers',
+            'action' => 'customer_deleted',
+            'target_account_number' => $targetAccountNumber,
+            'target_account_name' => $targetAccountName,
+            'description' => 'Admin deleted customer account.',
+            'old_values' => $oldAuditValues,
+            'new_values' => null,
+            'metadata' => [
+                'source' => 'admin_customer_delete',
+            ],
+        ], $request);
+
+        return response()->json([
+            'message' => 'Customer account deleted successfully.',
+        ]);
     }
 
-    private function resolveNextReadingDateAfterBillingDateChange(User $customer, $billingDate): string
+    public function updateConnectionStatus(Request $request, User $customer)
+    {
+        $validated = $request->validate([
+            'action' => ['required', Rule::in(['disconnect', 'reconnect'])],
+            'password' => ['required', 'string'],
+        ]);
+
+        $admin = $request->user();
+
+        if (!$admin || !Hash::check($validated['password'], $admin->password)) {
+            return response()->json([
+                'message' => 'Invalid authorization password.',
+            ], 422);
+        }
+
+        if ($customer->role !== 'user') {
+            return response()->json([
+                'message' => 'Only customer accounts can be disconnected or reconnected.',
+            ], 422);
+        }
+
+        $oldAuditValues = $this->auditCustomerValues($customer);
+
+        $badges = $customer->status_badges;
+
+        if (is_string($badges)) {
+            $decoded = json_decode($badges, true);
+            $badges = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($badges)) {
+            $badges = [];
+        }
+
+        $badges = array_values(array_unique(array_filter($badges)));
+
+        if ($validated['action'] === 'disconnect') {
+            if (!in_array('disconnected', $badges, true)) {
+                $badges[] = 'disconnected';
+            }
+
+            $customer->forceFill([
+                'status' => 'disconnected',
+                'status_badges' => array_values(array_unique($badges)),
+            ])->save();
+
+            $freshCustomer = $customer->fresh();
+
+            $this->logCustomerActivity(
+                $request,
+                'customer_disconnected',
+                'Admin disconnected customer account.',
+                $freshCustomer,
+                $oldAuditValues,
+                [
+                    'source' => 'admin_connection_status',
+                    'connection_action' => 'disconnect',
+                ]
+            );
+
+            return response()->json([
+                'message' => 'Customer disconnected successfully.',
+                'user' => $freshCustomer,
+            ]);
+        }
+
+        // reconnect
+        $badges = array_values(array_filter($badges, function ($badge) {
+            return $badge !== 'disconnected';
+        }));
+
+        $customer->forceFill([
+            'status' => 'ok',
+            'status_badges' => $badges,
+        ])->save();
+
+        $freshCustomer = $customer->fresh();
+
+        $this->logCustomerActivity(
+            $request,
+            'customer_reconnected',
+            'Admin reconnected customer account.',
+            $freshCustomer,
+            $oldAuditValues,
+            [
+                'source' => 'admin_connection_status',
+                'connection_action' => 'reconnect',
+            ]
+        );
+
+        return response()->json([
+            'message' => 'Customer reconnected successfully.',
+            'user' => $freshCustomer,
+        ]);
+    }
+
+
+    private function auditCustomerValues(User $customer): array
+    {
+        return [
+            'name' => $customer->name,
+            'account_name' => $customer->account_name ?? $customer->name,
+            'account_number' => $customer->account_number,
+            'meter_no' => $customer->meter_no,
+            'account_type' => $customer->account_type,
+            'barangay' => $customer->barangay,
+            'mobile' => $customer->mobile ?? $customer->contact ?? null,
+            'starting_meter' => $customer->starting_meter,
+            'billing_date' => $customer->billing_date,
+            'next_reading_date' => $customer->next_reading_date ?? null,
+            'previous_reading' => $customer->previous_reading,
+            'current_reading' => $customer->current_reading,
+            'status' => $customer->status,
+            'status_badges' => $this->normalizeAuditBadges($customer->status_badges ?? []),
+            'latitude' => $customer->latitude ?? null,
+            'longitude' => $customer->longitude ?? null,
+            'x_coordinate' => $customer->x_coordinate ?? null,
+            'y_coordinate' => $customer->y_coordinate ?? null,
+            'balance' => $customer->balance ?? null,
+        ];
+    }
+
+    private function normalizeAuditBadges($badges): array
+    {
+        if (is_string($badges)) {
+            $decoded = json_decode($badges, true);
+            $badges = is_array($decoded) ? $decoded : [];
+        }
+
+        if (!is_array($badges)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter($badges)));
+    }
+
+    private function logCustomerActivity(
+        Request $request,
+        string $action,
+        string $description,
+        User $customer,
+        array $oldValues,
+        array $metadata = []
+    ): void {
+        $newValues = $this->auditCustomerValues($customer);
+        [$oldChanged, $newChanged] = $this->changedAuditValues($oldValues, $newValues);
+
+        if (empty($oldChanged) && empty($newChanged)) {
+            return;
+        }
+
+        ActivityLogger::log([
+            'module' => 'customers',
+            'action' => $action,
+            'target_user' => $customer,
+            'description' => $description,
+            'old_values' => $oldChanged,
+            'new_values' => $newChanged,
+            'metadata' => $metadata,
+        ], $request);
+    }
+
+    private function changedAuditValues(array $oldValues, array $newValues): array
+    {
+        $oldChanged = [];
+        $newChanged = [];
+
+        foreach ($newValues as $key => $newValue) {
+            $oldValue = $oldValues[$key] ?? null;
+
+            if ($this->normalizeAuditValue($oldValue) !== $this->normalizeAuditValue($newValue)) {
+                $oldChanged[$key] = $oldValue;
+                $newChanged[$key] = $newValue;
+            }
+        }
+
+        return [$oldChanged, $newChanged];
+    }
+
+    private function normalizeAuditValue($value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+
+        if (is_array($value) || is_object($value)) {
+            return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
+        }
+
+        return trim((string) $value);
+    }
+
+    private function resolveNextReadingDateAfterBillingDateChange(User $user, $billingDate): string
     {
         $billingDay = $this->normalizeBillingDay($billingDate);
 
-        $latestReading = $customer->readings()
+        $latestReading = $user->readings()
             ->orderByDesc('date')
             ->orderByDesc('id')
             ->first();
@@ -579,157 +933,6 @@ class CustomerController extends Controller
         }
 
         return $billingDay;
-    }
-
-    /**
-     * DELETE /api/v1/customers/{customer}
-     */
-    public function destroy(Request $request, User $customer)
-    {
-        abort_unless($customer->role === 'user', 404);
-
-        $actor = $request->user();
-        $actorRole = strtolower((string) ($actor->role ?? ''));
-
-        if (!in_array($actorRole, ['master', 'admin', 'operator'], true)) {
-            return response()->json([
-                'message' => 'Forbidden.',
-            ], 403);
-        }
-
-        $data = $request->validate([
-            'authorization_password' => ['required', 'string'],
-        ]);
-
-        if (!Hash::check($data['authorization_password'], $actor->password)) {
-            return response()->json([
-                'message' => 'Invalid authorization password.',
-                'errors' => [
-                    'authorization_password' => [
-                        'The password you entered is incorrect.',
-                    ],
-                ],
-            ], 422);
-        }
-
-        DB::transaction(function () use ($customer) {
-            /*
-             * Delete related billing/history records first, so the customer delete
-             * will not fail on foreign key constraints.
-             */
-            $readingIds = collect();
-
-            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
-                $readingIds = DB::table('readings')
-                    ->where('user_id', $customer->id)
-                    ->pluck('id');
-            }
-
-            foreach (['payments', 'reading_payments'] as $paymentTable) {
-                if (!Schema::hasTable($paymentTable)) {
-                    continue;
-                }
-
-                if (Schema::hasColumn($paymentTable, 'user_id')) {
-                    DB::table($paymentTable)
-                        ->where('user_id', $customer->id)
-                        ->delete();
-                }
-
-                if (Schema::hasColumn($paymentTable, 'customer_id')) {
-                    DB::table($paymentTable)
-                        ->where('customer_id', $customer->id)
-                        ->delete();
-                }
-
-                if (
-                    $readingIds->isNotEmpty() &&
-                    Schema::hasColumn($paymentTable, 'reading_id')
-                ) {
-                    DB::table($paymentTable)
-                        ->whereIn('reading_id', $readingIds)
-                        ->delete();
-                }
-            }
-
-            if (Schema::hasTable('readings') && Schema::hasColumn('readings', 'user_id')) {
-                DB::table('readings')
-                    ->where('user_id', $customer->id)
-                    ->delete();
-            }
-
-            $customer->delete();
-        });
-
-        return response()->json([
-            'message' => 'Customer account deleted successfully.',
-        ]);
-    }
-
-    public function updateConnectionStatus(Request $request, User $customer)
-    {
-        $validated = $request->validate([
-            'action' => ['required', Rule::in(['disconnect', 'reconnect'])],
-            'password' => ['required', 'string'],
-        ]);
-
-        $admin = $request->user();
-
-        if (!$admin || !Hash::check($validated['password'], $admin->password)) {
-            return response()->json([
-                'message' => 'Invalid authorization password.',
-            ], 422);
-        }
-
-        if ($customer->role !== 'user') {
-            return response()->json([
-                'message' => 'Only customer accounts can be disconnected or reconnected.',
-            ], 422);
-        }
-
-        $badges = $customer->status_badges;
-
-        if (is_string($badges)) {
-            $decoded = json_decode($badges, true);
-            $badges = is_array($decoded) ? $decoded : [];
-        }
-
-        if (!is_array($badges)) {
-            $badges = [];
-        }
-
-        $badges = array_values(array_unique(array_filter($badges)));
-
-        if ($validated['action'] === 'disconnect') {
-            if (!in_array('disconnected', $badges, true)) {
-                $badges[] = 'disconnected';
-            }
-
-            $customer->forceFill([
-                'status' => 'disconnected',
-                'status_badges' => array_values(array_unique($badges)),
-            ])->save();
-
-            return response()->json([
-                'message' => 'Customer disconnected successfully.',
-                'user' => $customer->fresh(),
-            ]);
-        }
-
-        // reconnect
-        $badges = array_values(array_filter($badges, function ($badge) {
-            return $badge !== 'disconnected';
-        }));
-
-        $customer->forceFill([
-            'status' => 'ok',
-            'status_badges' => $badges,
-        ])->save();
-
-        return response()->json([
-            'message' => 'Customer reconnected successfully.',
-            'user' => $customer->fresh(),
-        ]);
     }
 
 }

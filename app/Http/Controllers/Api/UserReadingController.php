@@ -176,22 +176,6 @@ class UserReadingController extends Controller
             $user->last_usage = $billResult['usage'];
 
             /*
-            * Set the customer's next reading date based on the reading date
-            * and the customer's assigned billing day.
-            *
-            * Example:
-            * Reading date: Jun 10, 2026
-            * Billing date: 10
-            * Next reading date: Jul 10, 2026
-            *
-            * If the billing day is 31 and the next month has fewer days,
-            * use the last valid day of that next month.
-            */
-            if (Schema::hasColumn('users', 'next_reading_date')) {
-                $user->next_reading_date = $this->resolveNextReadingDate($date, $user->billing_date);
-            }
-
-            /*
             * After reader punches reading:
             * for_reading becomes due because a new bill was created.
             */
@@ -241,29 +225,6 @@ class UserReadingController extends Controller
             'reading' => $result['reading'],
             'user' => $result['user'],
         ], 201);
-    }
-
-    private function resolveNextReadingDate(Carbon $readingDate, $billingDate): string
-    {
-        $billingDay = (int) ($billingDate ?: $readingDate->day);
-
-        if ($billingDay < 1) {
-            $billingDay = 1;
-        }
-
-        if ($billingDay > 31) {
-            $billingDay = 31;
-        }
-
-        $nextMonth = $readingDate->copy()
-            ->startOfMonth()
-            ->addMonthNoOverflow();
-
-        $day = min($billingDay, $nextMonth->daysInMonth);
-
-        return $nextMonth->copy()
-            ->day($day)
-            ->toDateString();
     }
 
     /**
@@ -362,7 +323,54 @@ class UserReadingController extends Controller
             ->orderByDesc('readings.id')
             ->paginate($perPage, ['*'], 'page', $page);
 
-        $readings = $paginator->getCollection()->map(function ($reading) {
+        $readingIds = $paginator->getCollection()
+            ->pluck('id')
+            ->filter()
+            ->map(fn ($id) => (string) $id)
+            ->values();
+
+        /*
+         * Mark reading rows that were edited/corrected.
+         *
+         * Source of truth is activity_logs metadata, specifically:
+         * - module = readings
+         * - action = reading_corrected / reading_updated
+         * - metadata.reading_id = readings.id
+         */
+        $editLogsByReadingId = collect();
+
+        if ($readingIds->isNotEmpty() && Schema::hasTable('activity_logs')) {
+            $editLogsByReadingId = DB::table('activity_logs')
+                ->select([
+                    'id',
+                    'actor_user_id',
+                    'actor_name',
+                    'actor_role',
+                    'module',
+                    'action',
+                    'description',
+                    'metadata',
+                    'created_at',
+                ])
+                ->where('module', 'readings')
+                ->whereIn('action', ['reading_corrected', 'reading_updated'])
+                ->whereIn(
+                    DB::raw("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.reading_id'))"),
+                    $readingIds->all()
+                )
+                ->orderByDesc('created_at')
+                ->get()
+                ->groupBy(function ($log) {
+                    $metadata = json_decode((string) ($log->metadata ?? '{}'), true);
+
+                    return (string) data_get($metadata, 'reading_id', '');
+                });
+        }
+
+        $readings = $paginator->getCollection()->map(function ($reading) use ($editLogsByReadingId) {
+            $logsForReading = $editLogsByReadingId->get((string) $reading->id, collect());
+            $latestEditLog = $logsForReading->first();
+
             return [
                 'id' => $reading->id,
 
@@ -388,6 +396,13 @@ class UserReadingController extends Controller
 
                 'status' => $reading->status,
                 'createdAt' => $reading->created_at,
+
+                'isEdited' => $logsForReading->isNotEmpty(),
+                'editCount' => $logsForReading->count(),
+                'editedAt' => $latestEditLog?->created_at,
+                'editedBy' => $latestEditLog?->actor_name,
+                'editedByRole' => $latestEditLog?->actor_role,
+                'latestEditAction' => $latestEditLog?->action,
             ];
         });
 
